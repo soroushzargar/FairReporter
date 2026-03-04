@@ -479,7 +479,7 @@ def generate_dashboard_html(comparison: Dict) -> str:
             "sentiment_distribution": a1["sentiment_distribution"],
             "average_score": a1["average_score"],
             "articles": [
-                {k: v for k, v in art.items() if k in ("url", "title", "sentiment", "score")}
+                {k: v for k, v in art.items() if k in ("url", "title", "sentiment", "polarity", "subjectivity", "framing", "tone", "topic_relevance", "score")}
                 for art in a1.get("articles", [])
             ],
         },
@@ -489,7 +489,7 @@ def generate_dashboard_html(comparison: Dict) -> str:
             "sentiment_distribution": a2["sentiment_distribution"],
             "average_score": a2["average_score"],
             "articles": [
-                {k: v for k, v in art.items() if k in ("url", "title", "sentiment", "score")}
+                {k: v for k, v in art.items() if k in ("url", "title", "sentiment", "polarity", "subjectivity", "framing", "tone", "topic_relevance", "score")}
                 for art in a2.get("articles", [])
             ],
         },
