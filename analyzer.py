@@ -32,6 +32,11 @@ Article:
 Analyze this article and respond with ONLY valid JSON in the following format (no extra text):
 {{
   "sentiment": "<positive|negative|neutral>",
+  "polarity": "<very_negative|negative|slightly_negative|neutral|slightly_positive|positive|very_positive>",
+  "subjectivity": "<objective|mixed|opinionated>",
+  "topic_relevance": <integer from 0 to 100 indicating how much the article is about the topic>,
+  "framing": "<policy|economic|humanitarian|security|scientific|political|other>",
+  "tone": "<alarmist|critical|balanced|supportive|neutral>",
   "stance": "<brief 1-sentence description of the article's narrative stance>",
   "key_points": ["<point 1>", "<point 2>", "<point 3>"],
   "score": <integer from -5 (very negative) to 5 (very positive)>
@@ -48,7 +53,62 @@ def _parse_json_response(raw: str) -> Dict[str, Any]:
         except json.JSONDecodeError:
             pass
     # Fallback: return a neutral placeholder
-    return {"sentiment": "neutral", "stance": "", "key_points": [], "score": 0}
+    return {
+        "sentiment": "neutral",
+        "polarity": "neutral",
+        "subjectivity": "mixed",
+        "topic_relevance": 50,
+        "framing": "other",
+        "tone": "neutral",
+        "stance": "",
+        "key_points": [],
+        "score": 0,
+    }
+
+
+def _topic_keywords(topic: str) -> List[str]:
+    """Build normalized topic keywords for relevance filtering."""
+    words = re.findall(r"[a-zA-Z0-9]+", (topic or "").lower())
+    if not words:
+        return []
+    keywords = {" ".join(words)}
+    keywords.update(w for w in words if len(w) >= 4)
+    return sorted(keywords)
+
+
+def _topic_match_score(article: Dict, topic_keywords: List[str]) -> float:
+    """Return [0..1] score indicating textual match against topic keywords."""
+    if not topic_keywords:
+        return 1.0
+    haystack = " ".join([
+        article.get("title") or "",
+        article.get("content") or "",
+    ]).lower()
+    if not haystack.strip():
+        return 0.0
+
+    matched = sum(1 for kw in topic_keywords if kw in haystack)
+    return matched / len(topic_keywords)
+
+
+def filter_articles_by_topic(articles: List[Dict], topic: str, min_score: float = 0.3) -> List[Dict]:
+    """
+    Keep only articles with sufficient textual overlap to *topic*.
+
+    If no article passes the threshold, returns the original list so the
+    pipeline stays resilient on sparse feeds.
+    """
+    topic_keywords = _topic_keywords(topic)
+    if not topic_keywords:
+        return articles
+
+    filtered = []
+    for article in articles:
+        score = _topic_match_score(article, topic_keywords)
+        if score >= min_score:
+            filtered.append(article)
+
+    return filtered or articles
 
 
 def analyze_article(
@@ -83,7 +143,7 @@ def analyze_article(
     """
     content = article.get("content") or article.get("title") or ""
     if not content:
-        return {**article, "sentiment": "neutral", "stance": "", "key_points": [], "score": 0}
+        return {**article, **_parse_json_response("")}
 
     # Truncate very long content to keep prompts manageable
     content_snippet = content[:2000]
@@ -94,7 +154,7 @@ def analyze_article(
         analysis = _parse_json_response(raw)
     except Exception as exc:  # noqa: BLE001
         logger.warning("LLM analysis failed for %s: %s", article.get("url", "?"), exc)
-        analysis = {"sentiment": "neutral", "stance": "", "key_points": [], "score": 0}
+        analysis = _parse_json_response("")
 
     return {**article, **analysis}
 
@@ -128,9 +188,19 @@ def analyze_articles(
         Each article dict enriched with LLM analysis fields plus
         ``agency`` key.
     """
+    scoped_articles = filter_articles_by_topic(articles, topic)
+    if len(scoped_articles) != len(articles):
+        logger.info(
+            "[%s] Topic filter kept %d/%d article(s) for '%s'",
+            agency_name,
+            len(scoped_articles),
+            len(articles),
+            topic,
+        )
+
     results = []
-    total = len(articles)
-    for idx, article in enumerate(articles, 1):
+    total = len(scoped_articles)
+    for idx, article in enumerate(scoped_articles, 1):
         logger.info("[%s] Analyzing article %d/%d: %s", agency_name, idx, total, article.get("url", ""))
         enriched = analyze_article(article, topic=topic, model=model, base_url=base_url)
         enriched["agency"] = agency_name
@@ -187,6 +257,16 @@ def _articles_by_date(articles: List[Dict]) -> Dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def _distribution(articles: List[Dict], field: str, allowed: List[str]) -> Dict[str, int]:
+    counts: Counter = Counter(a.get(field, "") for a in articles)
+    return {k: counts.get(k, 0) for k in allowed}
+
+
+def _average_topic_relevance(articles: List[Dict]) -> float:
+    scores = [a.get("topic_relevance") for a in articles if isinstance(a.get("topic_relevance"), (int, float))]
+    return round(sum(scores) / len(scores), 2) if scores else 0.0
+
+
 def _overlap_keywords(kw1: List[Dict], kw2: List[Dict]) -> List[str]:
     """Return words that appear in both keyword lists."""
     set1 = {k["word"] for k in kw1}
@@ -238,7 +318,32 @@ def compare_agencies(
             "name": agency1_name,
             "article_count": len(agency1_results),
             "sentiment_distribution": _sentiment_distribution(agency1_results),
+            "polarity_distribution": _distribution(
+                agency1_results,
+                "polarity",
+                [
+                    "very_negative",
+                    "negative",
+                    "slightly_negative",
+                    "neutral",
+                    "slightly_positive",
+                    "positive",
+                    "very_positive",
+                ],
+            ),
+            "subjectivity_distribution": _distribution(agency1_results, "subjectivity", ["objective", "mixed", "opinionated"]),
+            "framing_distribution": _distribution(
+                agency1_results,
+                "framing",
+                ["policy", "economic", "humanitarian", "security", "scientific", "political", "other"],
+            ),
+            "tone_distribution": _distribution(
+                agency1_results,
+                "tone",
+                ["alarmist", "critical", "balanced", "supportive", "neutral"],
+            ),
             "average_score": avg1,
+            "average_topic_relevance": _average_topic_relevance(agency1_results),
             "top_keywords": kw1,
             "articles_by_date": _articles_by_date(agency1_results),
             "articles": agency1_results,
@@ -247,7 +352,32 @@ def compare_agencies(
             "name": agency2_name,
             "article_count": len(agency2_results),
             "sentiment_distribution": _sentiment_distribution(agency2_results),
+            "polarity_distribution": _distribution(
+                agency2_results,
+                "polarity",
+                [
+                    "very_negative",
+                    "negative",
+                    "slightly_negative",
+                    "neutral",
+                    "slightly_positive",
+                    "positive",
+                    "very_positive",
+                ],
+            ),
+            "subjectivity_distribution": _distribution(agency2_results, "subjectivity", ["objective", "mixed", "opinionated"]),
+            "framing_distribution": _distribution(
+                agency2_results,
+                "framing",
+                ["policy", "economic", "humanitarian", "security", "scientific", "political", "other"],
+            ),
+            "tone_distribution": _distribution(
+                agency2_results,
+                "tone",
+                ["alarmist", "critical", "balanced", "supportive", "neutral"],
+            ),
             "average_score": avg2,
+            "average_topic_relevance": _average_topic_relevance(agency2_results),
             "top_keywords": kw2,
             "articles_by_date": _articles_by_date(agency2_results),
             "articles": agency2_results,

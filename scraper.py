@@ -263,40 +263,6 @@ def _articles_from_feed(feed_url: str, topic: str, max_articles: int) -> List[Di
     return articles
 
 
-def _articles_from_feed_no_filter(feed_url: str, max_articles: int) -> List[Dict]:
-    """
-    Parse an RSS/Atom feed and return recent article stubs WITHOUT any topic filtering.
-    Used as a fallback when topic-based filtering returns no results.
-    """
-    resp = _get(feed_url)
-    if resp is None:
-        return []
-
-    parsed = feedparser.parse(resp.text)
-    articles = []
-
-    for entry in parsed.entries:
-        title = entry.get("title", "")
-        summary = entry.get("summary", "") or entry.get("description", "")
-        link = entry.get("link", "")
-        date = entry.get("published", "") or entry.get("updated", "")
-
-        articles.append({
-            "url": link,
-            "title": title,
-            "content": summary or title,
-            "level": "abstract" if summary else "title",
-            "date": date,
-        })
-
-        if len(articles) >= max_articles:
-            break
-
-    return articles
-
-
-
-
 def _articles_from_homepage(homepage_url: str, topic: str, max_articles: int) -> List[Dict]:
     """
     Scrape the homepage for article links and fetch each one adaptively.
@@ -395,12 +361,6 @@ def fetch_articles(
         articles = _articles_from_feed(rss_url, topic, max_articles)
         logger.info("Got %d articles from RSS (after topic filter)", len(articles))
         
-        # If topic filter returned nothing, try without filter  
-        if not articles and topic:
-            logger.info("Topic filter removed all articles; retrying RSS without topic filter")
-            articles = _articles_from_feed_no_filter(rss_url, max_articles)
-            logger.info("Got %d articles from RSS (without topic filter)", len(articles))
-        
         if articles:
             # Optionally enrich with full-text fetch for articles that only
             # have summary-level content from the feed
@@ -419,11 +379,5 @@ def fetch_articles(
     logger.info("Trying homepage fallback: %s", agency_url)
     articles = _articles_from_homepage(agency_url, topic, max_articles)
     logger.info("Got %d articles from homepage (with topic filter)", len(articles))
-    
-    # If homepage with topic filter returns nothing, try without filter
-    if not articles and topic:
-        logger.warning("Homepage topic filter returned no results; scraping without topic filter")
-        articles = _articles_from_homepage(agency_url, "", max_articles)
-        logger.info("Got %d articles from homepage (without topic filter)", len(articles))
     
     return articles

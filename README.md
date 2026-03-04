@@ -96,11 +96,12 @@ instead of scraping again.
 2. **Scraping** — Up to `--max` articles are fetched.  For each article the
    scraper tries (in order): full body text, abstract (title + first
    paragraphs), title only.
-3. **Analysis** — Each article is sent to the LLM which returns a JSON
-   object with `sentiment`, `stance`, `key_points`, and a numeric `score`
-   (−5 … +5).
-4. **Comparison** — Aggregated statistics (sentiment distribution, average
-   score, top keywords, overlap) are computed.
+3. **Analysis** — Topic-scoped articles are sent to the LLM which returns
+   `sentiment`, `polarity`, `subjectivity`, `framing`, `tone`, `stance`,
+   `key_points`, `topic_relevance`, and a numeric `score` (−5 … +5).
+4. **Comparison** — Aggregated statistics (sentiment/polarity/subjectivity
+   distributions, framing/tone distributions, average score, average topic
+   relevance, top keywords, overlap) are computed.
 5. **Visualization** — D3.js HTML files are written to `output/`.
 
 ---
