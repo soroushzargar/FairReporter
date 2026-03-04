@@ -138,7 +138,7 @@ def fetch_article_content(url: str) -> Dict:
     if resp is None:
         return result
 
-    soup = BeautifulSoup(resp.text, "lxml")
+    soup = BeautifulSoup(resp.text, "html.parser")
 
     # Attempt 1: full text
     full = _extract_full_text(soup)
@@ -193,7 +193,7 @@ def _find_rss_url(base: str, homepage_url: str) -> Optional[str]:
     # Check homepage HTML for <link rel="alternate" type="application/rss+xml">
     resp = _get(homepage_url)
     if resp:
-        soup = BeautifulSoup(resp.text, "lxml")
+        soup = BeautifulSoup(resp.text, "html.parser")
         for tag in soup.find_all("link", rel="alternate"):
             t = tag.get("type", "")
             if "rss" in t or "atom" in t:
@@ -227,6 +227,14 @@ def _articles_from_feed(feed_url: str, topic: str, max_articles: int) -> List[Di
     parsed = feedparser.parse(resp.text)
     articles = []
     topic_lower = topic.lower()
+    
+    # Create a list of topic keywords for more flexible matching
+    topic_keywords = []
+    if topic_lower:
+        # Add the full topic
+        topic_keywords.append(topic_lower)
+        # Add individual words from the topic (for multi-word topics like "Climate Change")
+        topic_keywords.extend([word.strip() for word in topic_lower.split() if len(word.strip()) > 3])
 
     for entry in parsed.entries:
         title = entry.get("title", "")
@@ -234,10 +242,12 @@ def _articles_from_feed(feed_url: str, topic: str, max_articles: int) -> List[Di
         link = entry.get("link", "")
         date = entry.get("published", "") or entry.get("updated", "")
 
-        # Basic topic relevance filter
+        # Flexible topic relevance filter - match any keyword
         combined = (title + " " + summary).lower()
-        if topic_lower and topic_lower not in combined:
-            continue
+        if topic_keywords:
+            # If at least one keyword matches, include the article
+            if not any(keyword in combined for keyword in topic_keywords):
+                continue
 
         articles.append({
             "url": link,
@@ -253,9 +263,39 @@ def _articles_from_feed(feed_url: str, topic: str, max_articles: int) -> List[Di
     return articles
 
 
-# ---------------------------------------------------------------------------
-# Homepage link scraping (fallback)
-# ---------------------------------------------------------------------------
+def _articles_from_feed_no_filter(feed_url: str, max_articles: int) -> List[Dict]:
+    """
+    Parse an RSS/Atom feed and return recent article stubs WITHOUT any topic filtering.
+    Used as a fallback when topic-based filtering returns no results.
+    """
+    resp = _get(feed_url)
+    if resp is None:
+        return []
+
+    parsed = feedparser.parse(resp.text)
+    articles = []
+
+    for entry in parsed.entries:
+        title = entry.get("title", "")
+        summary = entry.get("summary", "") or entry.get("description", "")
+        link = entry.get("link", "")
+        date = entry.get("published", "") or entry.get("updated", "")
+
+        articles.append({
+            "url": link,
+            "title": title,
+            "content": summary or title,
+            "level": "abstract" if summary else "title",
+            "date": date,
+        })
+
+        if len(articles) >= max_articles:
+            break
+
+    return articles
+
+
+
 
 def _articles_from_homepage(homepage_url: str, topic: str, max_articles: int) -> List[Dict]:
     """
@@ -265,9 +305,15 @@ def _articles_from_homepage(homepage_url: str, topic: str, max_articles: int) ->
     if resp is None:
         return []
 
-    soup = BeautifulSoup(resp.text, "lxml")
+    soup = BeautifulSoup(resp.text, "html.parser")
     base = _base_url(homepage_url)
     topic_lower = topic.lower()
+    
+    # Create a list of topic keywords for more flexible matching
+    topic_keywords = []
+    if topic_lower:
+        topic_keywords.append(topic_lower)
+        topic_keywords.extend([word.strip() for word in topic_lower.split() if len(word.strip()) > 3])
 
     seen: Set[str] = set()
     links: List[str] = []
@@ -283,10 +329,11 @@ def _articles_from_homepage(homepage_url: str, topic: str, max_articles: int) ->
         path = urlparse(full_url).path
         if len(path.split("/")) < 3:
             continue
-        # Topic filter on anchor text
+        # Flexible topic filter on anchor text - match any keyword
         anchor_text = a_tag.get_text(" ", strip=True).lower()
-        if topic_lower and topic_lower not in anchor_text:
-            continue
+        if topic_keywords:
+            if not any(keyword in anchor_text for keyword in topic_keywords):
+                continue
         seen.add(full_url)
         links.append(full_url)
         if len(links) >= max_articles:
@@ -344,7 +391,16 @@ def fetch_articles(
 
     if rss_url:
         logger.info("Using RSS feed: %s", rss_url)
+        # Try with topic filter first
         articles = _articles_from_feed(rss_url, topic, max_articles)
+        logger.info("Got %d articles from RSS (after topic filter)", len(articles))
+        
+        # If topic filter returned nothing, try without filter  
+        if not articles and topic:
+            logger.info("Topic filter removed all articles; retrying RSS without topic filter")
+            articles = _articles_from_feed_no_filter(rss_url, max_articles)
+            logger.info("Got %d articles from RSS (without topic filter)", len(articles))
+        
         if articles:
             # Optionally enrich with full-text fetch for articles that only
             # have summary-level content from the feed
@@ -356,7 +412,18 @@ def fetch_articles(
                         art.update(full)
                 enriched.append(art)
             return enriched[:max_articles]
+        else:
+            logger.warning("RSS feed exists but has no articles")
 
-    # Step 3: homepage fallback
-    logger.info("No RSS feed found; scraping homepage: %s", agency_url)
-    return _articles_from_homepage(agency_url, topic, max_articles)
+    # Step 3: homepage fallback  
+    logger.info("Trying homepage fallback: %s", agency_url)
+    articles = _articles_from_homepage(agency_url, topic, max_articles)
+    logger.info("Got %d articles from homepage (with topic filter)", len(articles))
+    
+    # If homepage with topic filter returns nothing, try without filter
+    if not articles and topic:
+        logger.warning("Homepage topic filter returned no results; scraping without topic filter")
+        articles = _articles_from_homepage(agency_url, "", max_articles)
+        logger.info("Got %d articles from homepage (without topic filter)", len(articles))
+    
+    return articles

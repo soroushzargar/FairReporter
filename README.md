@@ -74,11 +74,18 @@ All files are written to the `output/` directory (created automatically):
 | File | Contents |
 |------|---------|
 | `stats.json` | Raw comparison statistics |
+| `cache/*.json` | Cached fetched articles keyed by agency/topic/max |
 | `timeline.html` | D3.js dual-agency article-frequency timeline |
 | `wordcloud.html` | D3.js side-by-side word clouds |
 | `dashboard.html` | Combined interactive summary dashboard |
 
 Open `output/dashboard.html` in any modern browser to explore the results.
+
+### Fetch cache
+
+Fetched article lists are cached under `output/cache/`. If you run the same
+agency/topic/max combination again, FairReporter loads the cached articles
+instead of scraping again.
 
 ---
 

@@ -15,8 +15,10 @@ Optional flags:
 """
 
 import argparse
+import hashlib
 import json
 import logging
+import os
 import sys
 
 from llm_discovery import discover_agency_url, discover_rss_url, DEFAULT_MODEL, DEFAULT_OLLAMA_BASE_URL
@@ -30,6 +32,8 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+CACHE_DIR = "cache"
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +64,57 @@ def _build_parser() -> argparse.ArgumentParser:
 # Pipeline steps
 # ---------------------------------------------------------------------------
 
+def _cache_file_path(
+    agency_name: str,
+    agency_url: str,
+    topic: str,
+    max_articles: int,
+    output_dir: str,
+) -> str:
+    """Return deterministic cache path for one fetch request."""
+    marker = {
+        "agency_name": agency_name.strip().lower(),
+        "agency_url": agency_url.strip().lower(),
+        "topic": topic.strip().lower(),
+        "max_articles": int(max_articles),
+    }
+    raw = json.dumps(marker, sort_keys=True, ensure_ascii=False)
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    safe_agency = "".join(c if c.isalnum() else "_" for c in agency_name.strip().lower()).strip("_")
+    if not safe_agency:
+        safe_agency = "agency"
+    file_name = f"{safe_agency}_{digest}.json"
+    return os.path.join(output_dir, CACHE_DIR, file_name)
+
+
+def _load_fetch_cache(cache_path: str):
+    """Load cached articles if available and valid."""
+    if not os.path.exists(cache_path):
+        return None
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        articles = payload.get("articles")
+        if isinstance(articles, list):
+            logger.info("Loaded %d cached article(s) from %s", len(articles), cache_path)
+            return articles
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Could not read cache file %s: %s", cache_path, exc)
+    return None
+
+
+def _save_fetch_cache(cache_path: str, marker: dict, articles) -> None:
+    """Persist fetched articles to cache."""
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    payload = {
+        "marker": marker,
+        "count": len(articles),
+        "articles": articles,
+    }
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    logger.info("Saved %d article(s) to cache: %s", len(articles), cache_path)
+
 def _discover_url(agency_name: str, override: str, model: str, ollama_url: str) -> str:
     """Return a URL for *agency_name*, using *override* if provided."""
     if override:
@@ -76,11 +131,32 @@ def _discover_url(agency_name: str, override: str, model: str, ollama_url: str) 
     return url
 
 
-def _fetch(agency_name: str, agency_url: str, topic: str, model: str, ollama_url: str, max_articles: int):
+def _fetch(
+    agency_name: str,
+    agency_url: str,
+    topic: str,
+    model: str,
+    ollama_url: str,
+    max_articles: int,
+    output_dir: str,
+):
     """Discover RSS feed and scrape articles for one agency."""
     logger.info("=== %s (%s) ===", agency_name, agency_url)
+
+    marker = {
+        "agency_name": agency_name,
+        "agency_url": agency_url,
+        "topic": topic,
+        "max_articles": max_articles,
+    }
+    cache_path = _cache_file_path(agency_name, agency_url, topic, max_articles, output_dir)
+    cached_articles = _load_fetch_cache(cache_path)
+    if cached_articles is not None:
+        return cached_articles
+
     rss_url = discover_rss_url(agency_name, agency_url, model=model, base_url=ollama_url)
     articles = fetch_articles(agency_url, topic, rss_url=rss_url, max_articles=max_articles)
+    _save_fetch_cache(cache_path, marker, articles)
     logger.info("Fetched %d article(s) for '%s'", len(articles), agency_name)
     return articles
 
@@ -116,8 +192,8 @@ def main() -> None:
 
     # Step 2: Scraping
     print("📥  Step 2: Scraping articles …")
-    articles1 = _fetch(args.agency1, url1, args.topic, args.model, args.ollama_url, args.max_articles)
-    articles2 = _fetch(args.agency2, url2, args.topic, args.model, args.ollama_url, args.max_articles)
+    articles1 = _fetch(args.agency1, url1, args.topic, args.model, args.ollama_url, args.max_articles, args.output)
+    articles2 = _fetch(args.agency2, url2, args.topic, args.model, args.ollama_url, args.max_articles, args.output)
     print(f"   {args.agency1}: {len(articles1)} article(s)")
     print(f"   {args.agency2}: {len(articles2)} article(s)\n")
 
